@@ -54,15 +54,16 @@ SEL_ENTIDAD: str = "input#nombreEntidad"                # Entidad
 SEL_FECHA_INICIO: str = "input#fechaIni"                # Fecha apertura desde
 SEL_FECHA_FIN: str = "input#fechaFin"                   # Fecha apertura hasta
 
-# --- Selects (dropdowns) ---
-SEL_MODALIDAD: str = "select#modalidad"                 # Modalidad de contratación
-SEL_DEPARTAMENTO: str = "select#departamento"           # Departamento
-SEL_MUNICIPIO: str = "select#ciudad"                    # Municipio (depende de departamento)
-SEL_ESTADO: str = "select#estado"                       # Estado del proceso
+# --- Selects (dropdowns) — IDs verificados contra el DOM real de SECOP I ---
+SEL_OBJETO: str = "select#objeto"                       # Producto o Servicio (UNSPSC)
+SEL_MODALIDAD: str = "select#tipoProceso"               # Modalidad de contratación
+SEL_DEPARTAMENTO: str = "select#selDepartamento"        # Departamento de ejecución
+SEL_MUNICIPIO: str = "select#selMunicipio"              # Municipio (carga AJAX tras depto)
+SEL_ESTADO: str = "select#estado"                       # Estado del proceso (carga dinámica)
 SEL_FAMILIA: str = "select#familia"                     # Familia UNSPSC
 
 # --- Botones ---
-SEL_BTN_BUSCAR: str = "input#btnBuscar"                 # Botón buscar
+SEL_BTN_BUSCAR: str = "img#ctl00_ContentPlaceHolder1_imgBuscar"  # Botón buscar (es <img>)
 SEL_BTN_LIMPIAR: str = "input#btnLimpiar"               # Botón limpiar formulario
 
 # ────────────────────────────────────────────────────────────
@@ -203,10 +204,11 @@ class SearchParams:
         entidad:        Nombre (parcial) de la entidad compradora.
         fecha_inicio:   Fecha apertura desde (``dd/MM/yyyy``).
         fecha_fin:      Fecha apertura hasta  (``dd/MM/yyyy``).
-        modalidad:      Valor visible del dropdown *Modalidad*.
-        departamento:   Valor visible del dropdown *Departamento*.
-        municipio:      Valor visible del dropdown *Municipio*.
-        estado:         Valor visible del dropdown *Estado*.
+        objeto:         Valor (value) del dropdown *Producto o Servicio*.
+        modalidad:      Valor (value) del dropdown *Modalidad de Contratación*.
+        departamento:   Valor (value) del dropdown *Departamento*.
+        municipio:      Valor (value) o texto del dropdown *Municipio*.
+        estado:         Texto visible del dropdown *Estado* (carga dinámica).
         familia:        Código o texto de la familia UNSPSC.
         max_pages:      Límite de páginas a recorrer (override global).
     """
@@ -216,12 +218,29 @@ class SearchParams:
     entidad: Optional[str] = None
     fecha_inicio: Optional[str] = None
     fecha_fin: Optional[str] = None
+    objeto: Optional[str] = None
     modalidad: Optional[str] = None
     departamento: Optional[str] = None
     municipio: Optional[str] = None
     estado: Optional[str] = None
     familia: Optional[str] = None
     max_pages: int = MAX_PAGES
+
+
+# ────────────────────────────────────────────────────────────
+# 10b. CONFIGURACIONES PREDETERMINADAS DE BÚSQUEDA
+# ────────────────────────────────────────────────────────────
+
+# Valores de los <option value="..."> del DOM real de SECOP I
+VALOR_DEPTO_SANTANDER: str = "668000"
+VALOR_MODALIDAD_MINIMA_CUANTIA: str = "13"
+TEXTO_ESTADO_CELEBRADO: str = "Celebrado"
+
+SEARCH_SANTANDER_MINIMA_CELEBRADO = SearchParams(
+    departamento=VALOR_DEPTO_SANTANDER,
+    modalidad=VALOR_MODALIDAD_MINIMA_CUANTIA,
+    estado=TEXTO_ESTADO_CELEBRADO,
+)
 
 
 # ────────────────────────────────────────────────────────────

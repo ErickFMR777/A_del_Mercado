@@ -128,16 +128,22 @@ Ejemplos:
         help="Fecha apertura hasta (dd/MM/yyyy).",
     )
     grupo_busqueda.add_argument(
+        "--objeto",
+        type=str,
+        default=None,
+        help="Producto o Servicio — value del <option> (ej. '80000000').",
+    )
+    grupo_busqueda.add_argument(
         "--modalidad", "-m",
         type=str,
         default=None,
-        help="Modalidad de contratación (texto visible del dropdown).",
+        help="Modalidad de contratación — value del <option> (ej. '13' = Mínima Cuantía).",
     )
     grupo_busqueda.add_argument(
         "--departamento", "-d",
         type=str,
         default=None,
-        help="Departamento (texto visible del dropdown).",
+        help="Departamento — value del <option> (ej. '668000' = Santander).",
     )
     grupo_busqueda.add_argument(
         "--municipio",
@@ -215,6 +221,7 @@ def args_a_search_params(args: argparse.Namespace) -> SearchParams:
         entidad=args.entidad,
         fecha_inicio=args.fecha_inicio,
         fecha_fin=args.fecha_fin,
+        objeto=args.objeto,
         modalidad=args.modalidad,
         departamento=args.departamento,
         municipio=args.municipio,
@@ -256,18 +263,14 @@ def ejecutar_modo_busqueda(args: argparse.Namespace) -> int:
     """Ejecuta el pipeline completo en modo búsqueda.
 
     Flujo:
-      1. Crear SearchParams desde los argumentos.
-      2. Ejecutar scraping (formulario + paginación).
-      3. Parsear todas las páginas HTML.
-      4. Limpiar el DataFrame.
-      5. Exportar a CSV.
-      6. (Opcional) Actualizar base histórica.
+      1. Intentar scraping con Selenium (SECOP I).
+      2. Si Selenium falla (403, timeout, WebDriver), usar API de
+         Datos Abiertos (SECOP II) como fallback automático.
+      3. Parsear / Limpiar / Exportar CSV.
 
     Returns:
         Código de salida (0 = éxito, 1 = error).
     """
-    from scraper import cerrar_driver, crear_driver, ejecutar_scraping
-    from parser import parsear_todas_paginas
     from cleaning import limpiar_dataframe
 
     params = args_a_search_params(args)
@@ -278,85 +281,95 @@ def ejecutar_modo_busqueda(args: argparse.Namespace) -> int:
     logger.info("Parámetros: %s", params)
     logger.info("=" * 70)
 
-    driver = crear_driver()
+    df_limpio = None
 
+    # ── Intento 1: Selenium (SECOP I) ──
     try:
-        # --- Paso 1: Scraping ---
-        logger.info("[1/4] Ejecutando scraping...")
-        paginas_html, urls_detalle = ejecutar_scraping(
-            params=params,
-            driver=driver,
-            cerrar_al_final=False,
+        from scraper import cerrar_driver, crear_driver, ejecutar_scraping
+        from parser import parsear_todas_paginas
+
+        logger.info("[Selenium] Intentando scraping con navegador...")
+        driver = crear_driver()
+
+        try:
+            paginas_html, urls_detalle = ejecutar_scraping(
+                params=params,
+                driver=driver,
+                cerrar_al_final=False,
+            )
+            logger.info(
+                "Scraping completado: %d páginas, %d URLs de detalle.",
+                len(paginas_html), len(urls_detalle),
+            )
+
+            df_crudo = parsear_todas_paginas(paginas_html)
+            logger.info("Parsing completado: %d filas crudas.", len(df_crudo))
+
+            df_limpio = limpiar_dataframe(df_crudo)
+            logger.info("Limpieza completada: %d filas limpias.", len(df_limpio))
+
+        finally:
+            cerrar_driver(driver)
+
+    except Exception as exc_selenium:
+        logger.warning(
+            "[Selenium] Falló el scraping con navegador: %s", exc_selenium
         )
-        logger.info(
-            "Scraping completado: %d páginas, %d URLs de detalle.",
-            len(paginas_html), len(urls_detalle),
-        )
+        logger.info("[API] Cambiando a API de Datos Abiertos (datos.gov.co)...")
 
-        # --- Paso 2: Parsing ---
-        logger.info("[2/4] Parseando resultados...")
-        df_crudo = parsear_todas_paginas(paginas_html)
-        logger.info("Parsing completado: %d filas crudas.", len(df_crudo))
+    # ── Intento 2: API de Datos Abiertos (fallback) ──
+    if df_limpio is None or df_limpio.empty:
+        try:
+            from api_scraper import consultar_desde_params
 
-        # --- Paso 3: Limpieza ---
-        logger.info("[3/4] Limpiando DataFrame...")
-        df_limpio = limpiar_dataframe(df_crudo)
-        logger.info("Limpieza completada: %d filas limpias.", len(df_limpio))
+            logger.info("[API] Consultando SECOP II vía datos.gov.co...")
+            df_api = consultar_desde_params(params)
 
-        # --- Paso 4: Exportación ---
-        logger.info("[4/4] Exportando resultados...")
-        df_limpio.to_csv(
-            ruta_salida,
-            index=False,
-            sep=CSV_SEPARATOR,
-            encoding=CSV_ENCODING,
-        )
-        logger.info("Resultados exportados a: %s", ruta_salida)
+            if df_api.empty:
+                logger.warning("[API] La consulta no retornó registros.")
+                print("\n⚠️  Sin resultados en la API.")
+                return 0
 
-        # --- Opcional: Actualizar base histórica ---
-        if args.historica:
-            from detail_scraper import actualizar_base_historica
-            actualizar_base_historica(df_limpio, args.historica)
+            df_limpio = limpiar_dataframe(df_api)
+            logger.info("[API] %d registros obtenidos y limpiados.", len(df_limpio))
 
-        # --- Resumen ---
-        logger.info("=" * 70)
-        logger.info("RESUMEN DE BÚSQUEDA")
-        logger.info("  Filas totales:     %d", len(df_limpio))
-        logger.info("  Columnas:          %s", list(df_limpio.columns))
-        logger.info("  Archivo de salida: %s", ruta_salida)
-        logger.info("=" * 70)
+        except Exception as exc_api:
+            logger.exception("[API] Error en consulta API: %s", exc_api)
+            print(f"\n❌ Error: ni Selenium ni la API pudieron obtener datos.\n"
+                  f"  Selenium: {exc_selenium}\n  API: {exc_api}")
+            return 1
 
-        # Vista previa
-        print("\n" + "=" * 70)
-        print("VISTA PREVIA DE RESULTADOS")
-        print("=" * 70)
-        print(df_limpio.head(10).to_string(index=False))
-        print(f"\n[Total: {len(df_limpio)} registros → {ruta_salida}]")
+    # ── Exportación ──
+    logger.info("Exportando resultados...")
+    df_limpio.to_csv(
+        ruta_salida,
+        index=False,
+        sep=CSV_SEPARATOR,
+        encoding=CSV_ENCODING,
+    )
+    logger.info("Resultados exportados a: %s", ruta_salida)
 
-        return 0
+    # --- Opcional: Actualizar base histórica ---
+    if args.historica:
+        from detail_scraper import actualizar_base_historica
+        actualizar_base_historica(df_limpio, args.historica)
 
-    except SecopEmptyTableError as exc:
-        logger.warning("Sin resultados: %s", exc)
-        print(f"\n⚠️  Sin resultados: {exc}")
-        return 0
+    # --- Resumen ---
+    logger.info("=" * 70)
+    logger.info("RESUMEN DE BÚSQUEDA")
+    logger.info("  Filas totales:     %d", len(df_limpio))
+    logger.info("  Columnas:          %s", list(df_limpio.columns))
+    logger.info("  Archivo de salida: %s", ruta_salida)
+    logger.info("=" * 70)
 
-    except SecopRecaptchaError as exc:
-        logger.error("CAPTCHA no resuelto: %s", exc)
-        print(f"\n❌ CAPTCHA detectado: {exc}")
-        return 1
+    # Vista previa
+    print("\n" + "=" * 70)
+    print("VISTA PREVIA DE RESULTADOS")
+    print("=" * 70)
+    print(df_limpio.head(10).to_string(index=False))
+    print(f"\n[Total: {len(df_limpio)} registros → {ruta_salida}]")
 
-    except SecopError as exc:
-        logger.error("Error del pipeline: %s", exc)
-        print(f"\n❌ Error: {exc}")
-        return 1
-
-    except Exception as exc:
-        logger.exception("Error inesperado: %s", exc)
-        print(f"\n❌ Error inesperado: {exc}")
-        return 1
-
-    finally:
-        cerrar_driver(driver)
+    return 0
 
 
 # ════════════════════════════════════════════════════════════

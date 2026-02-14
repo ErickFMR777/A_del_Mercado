@@ -62,6 +62,7 @@ from config import (
     SEL_MODALIDAD,
     SEL_MUNICIPIO,
     SEL_NUMERO_PROCESO,
+    SEL_OBJETO,
     SEL_PAGINA_SIGUIENTE,
     SEL_TABLA_RESULTADOS,
     SEL_TABLA_RESULTADOS_FALLBACK,
@@ -320,6 +321,76 @@ def _seleccionar_dropdown(
         ) from exc
 
 
+def _seleccionar_dropdown_por_valor(
+    driver: WebDriver, css: str, valor: Optional[str]
+) -> None:
+    """Selecciona una opción de un ``<select>`` por su atributo ``value``.
+
+    Más confiable que ``select_by_visible_text`` cuando se conocen los
+    valores de los ``<option>`` del DOM.
+
+    Args:
+        driver: WebDriver activo.
+        css:    Selector CSS del elemento ``<select>``.
+        valor:  Atributo ``value`` de la opción a seleccionar (``None`` = omitir).
+    """
+    if valor is None:
+        return
+
+    try:
+        elemento = _esperar_elemento(driver, By.CSS_SELECTOR, css)
+        select = Select(elemento)
+        select.select_by_value(valor)
+        logger.debug("Dropdown '%s' → value='%s'", css, valor)
+    except NoSuchElementException:
+        logger.warning(
+            "Value '%s' no encontrado en dropdown '%s'. Opciones: %s",
+            valor, css,
+            [(o.get_attribute("value"), o.text.strip()) for o in Select(
+                driver.find_element(By.CSS_SELECTOR, css)
+            ).options[:10]],
+        )
+    except SecopTimeoutError:
+        logger.warning("Dropdown '%s' no encontrado, se omite.", css)
+    except WebDriverException as exc:
+        raise SecopFormError(
+            f"Error seleccionando valor en dropdown '{css}'",
+            context={"selector": css, "valor": valor, "error": str(exc)},
+        ) from exc
+
+
+def _esperar_opciones_estado(
+    driver: WebDriver, css: str, timeout: int = DEFAULT_TIMEOUT
+) -> bool:
+    """Espera a que el dropdown de Estado cargue opciones dinámicamente.
+
+    El portal SECOP I carga las opciones del select de Estado mediante
+    AJAX después de interactuar con otros campos.  Esta función espera
+    hasta que haya más de 1 opción (descartando el placeholder).
+
+    Args:
+        driver:  WebDriver activo.
+        css:     Selector CSS del ``<select>``.
+        timeout: Segundos máximos de espera.
+
+    Returns:
+        ``True`` si se cargaron opciones; ``False`` si expiró el timeout.
+    """
+    try:
+        WebDriverWait(driver, timeout).until(
+            lambda d: len(
+                Select(d.find_element(By.CSS_SELECTOR, css)).options
+            ) > 1
+        )
+        logger.debug("Opciones de '%s' cargadas dinámicamente.", css)
+        return True
+    except (TimeoutException, NoSuchElementException):
+        logger.warning(
+            "Timeout esperando opciones dinámicas en '%s' (%d s).", css, timeout
+        )
+        return False
+
+
 # ════════════════════════════════════════════════════════════
 # 4. RELLENAR FORMULARIO COMPLETO
 # ════════════════════════════════════════════════════════════
@@ -330,6 +401,11 @@ def rellenar_formulario(driver: WebDriver, params: SearchParams) -> None:
 
     Navega a la URL de consulta, espera la carga del formulario y
     rellena únicamente los campos cuyos parámetros no sean ``None``.
+
+    Los dropdowns de Modalidad y Departamento se seleccionan por **value**
+    (atributo ``value`` del ``<option>``), lo cual es más fiable que por
+    texto visible.  El dropdown de Estado se carga dinámicamente por
+    AJAX, por lo que se espera a que aparezcan opciones antes de seleccionar.
 
     Args:
         driver: WebDriver activo.
@@ -358,27 +434,40 @@ def rellenar_formulario(driver: WebDriver, params: SearchParams) -> None:
     _rellenar_campo(driver, SEL_FECHA_INICIO, params.fecha_inicio)
     _rellenar_campo(driver, SEL_FECHA_FIN, params.fecha_fin)
 
-    # --- Selectores dropdown ---
-    _seleccionar_dropdown(driver, SEL_MODALIDAD, params.modalidad)
-    _seleccionar_dropdown(driver, SEL_DEPARTAMENTO, params.departamento)
+    # --- Producto o Servicio (select#objeto) — por value ---
+    _seleccionar_dropdown_por_valor(driver, SEL_OBJETO, params.objeto)
+
+    # --- Modalidad de Contratación (select#tipoProceso) — por value ---
+    _seleccionar_dropdown_por_valor(driver, SEL_MODALIDAD, params.modalidad)
+
+    # --- Departamento (select#selDepartamento) — por value ---
+    _seleccionar_dropdown_por_valor(driver, SEL_DEPARTAMENTO, params.departamento)
 
     # Si se selecciona departamento, puede que se cargue municipio dinámicamente
     if params.departamento and params.municipio:
-        # Espera breve para carga AJAX del municipio
-        time.sleep(1.5)
+        time.sleep(2.0)  # Espera para carga AJAX del municipio
         _seleccionar_dropdown(driver, SEL_MUNICIPIO, params.municipio)
 
-    _seleccionar_dropdown(driver, SEL_ESTADO, params.estado)
+    # --- Estado (carga dinámica por AJAX) ---
+    if params.estado:
+        # El dropdown de estado carga sus opciones dinámicamente.
+        # Esperamos a que tenga más de 1 opción (el placeholder "Seleccione Estado").
+        _esperar_opciones_estado(driver, SEL_ESTADO, timeout=10)
+        _seleccionar_dropdown(driver, SEL_ESTADO, params.estado)
+
+    # --- Familia UNSPSC ---
     _seleccionar_dropdown(driver, SEL_FAMILIA, params.familia)
 
     logger.info(
         "Formulario rellenado: palabra_clave=%r, fechas=%s→%s, "
-        "modalidad=%r, departamento=%r",
+        "objeto=%r, modalidad=%r, departamento=%r, estado=%r",
         params.palabra_clave,
         params.fecha_inicio,
         params.fecha_fin,
+        params.objeto,
         params.modalidad,
         params.departamento,
+        params.estado,
     )
 
 
