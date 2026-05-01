@@ -558,20 +558,27 @@ div[data-baseweb="tab-list"] {
 # ────────────────────────────────────────────────────────────
 
 
-@st.cache_data
-def cargar_datos() -> pd.DataFrame:
-    """Carga el CSV y prepara columnas para búsqueda."""
-    df = pd.read_csv(CSV_PATH, dtype=str)
-    df["valor_del_contrato"] = pd.to_numeric(df["valor_del_contrato"], errors="coerce")
-    df["valor_pagado"] = pd.to_numeric(df["valor_pagado"], errors="coerce")
+def cargar_datos(path: Path | None = None, uploaded_file=None) -> pd.DataFrame:
+    """Carga el CSV desde disco o desde un archivo subido por el usuario."""
+    if uploaded_file is not None:
+        df = pd.read_csv(uploaded_file, dtype=str)
+    elif path is not None and path.exists():
+        df = pd.read_csv(path, dtype=str)
+    else:
+        raise FileNotFoundError(
+            f"No se encontró el archivo de datos: {path}"
+        )
+
+    df["valor_del_contrato"] = pd.to_numeric(df.get("valor_del_contrato"), errors="coerce")
+    df["valor_pagado"] = pd.to_numeric(df.get("valor_pagado"), errors="coerce")
     df["fecha_inicio"] = pd.to_datetime(
-        df["fecha_de_inicio_del_contrato"], errors="coerce"
+        df.get("fecha_de_inicio_del_contrato"), errors="coerce"
     )
     df["fecha_fin"] = pd.to_datetime(
-        df["fecha_de_fin_del_contrato"], errors="coerce"
+        df.get("fecha_de_fin_del_contrato"), errors="coerce"
     )
     # Columna de búsqueda normalizada (minúsculas, sin tildes extra)
-    df["_busqueda"] = df["objeto_del_contrato"].fillna("").str.lower()
+    df["_busqueda"] = df.get("objeto_del_contrato", "").fillna("").str.lower()
     return df
 
 
@@ -998,8 +1005,30 @@ def _generar_informe_pdf(contratos: pd.DataFrame, palabras_busqueda: str = "") -
 # UI
 # ────────────────────────────────────────────────────────────
 
-# ── Header principal ──
-df = cargar_datos()
+# ── Datos de entrada ──
+uploaded_file = None
+if not CSV_PATH.exists():
+    st.warning(
+        f"No se encontró el dataset local en `{CSV_PATH}`.\n"
+        "Puedes subir un CSV generado por el pipeline o usar un archivo de ejemplo."
+    )
+    uploaded_file = st.file_uploader(
+        "Cargar archivo CSV de contratos",
+        type=["csv"],
+        help="El CSV debe contener las columnas mínimas esperadas por el dashboard.",
+    )
+    if uploaded_file is None:
+        st.info("Sube un archivo CSV para iniciar el análisis.")
+        st.stop()
+
+try:
+    df = cargar_datos(CSV_PATH if CSV_PATH.exists() else None, uploaded_file)
+except FileNotFoundError as exc:
+    st.error(str(exc))
+    st.stop()
+except Exception as exc:
+    st.error("Error al cargar los datos: " + str(exc))
+    st.stop()
 
 n_total = len(df)
 n_entidades_hero = df["nombre_entidad"].nunique()

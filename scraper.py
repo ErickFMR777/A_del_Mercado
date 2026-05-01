@@ -42,6 +42,7 @@ from config import (
     CHROME_ARGUMENTS,
     CHROME_HEADLESS,
     CHROME_PREFS,
+    CHROME_USER_AGENT,
     DEFAULT_TIMEOUT,
     IFRAME_NAME,
     IFRAME_XPATH,
@@ -103,11 +104,14 @@ def crear_driver() -> WebDriver:
     for arg in CHROME_ARGUMENTS:
         options.add_argument(arg)
 
+    options.add_argument(f"--user-agent={CHROME_USER_AGENT}")
+
     if CHROME_HEADLESS:
         options.add_argument("--headless=new")
         logger.info("Modo headless activado.")
 
     options.add_experimental_option("prefs", CHROME_PREFS)
+    options.binary_location = "/usr/bin/google-chrome-stable"
 
     # Ocultar indicadores de automatización
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
@@ -396,6 +400,41 @@ def _esperar_opciones_estado(
 # ════════════════════════════════════════════════════════════
 
 
+def _verificar_error_http(driver: WebDriver) -> None:
+    """Detecta respuestas HTTP visibles en el DOM como 403 Forbidden."""
+    source = driver.page_source.lower()
+    title = driver.title.lower()
+    if "403 forbidden" in title or "403 forbidden" in source:
+        raise SecopFormError(
+            "SECOP devolvió 403 Forbidden al intentar acceder al formulario.",
+            context={"url": driver.current_url},
+        )
+
+
+def _encontrar_boton_buscar(driver: WebDriver) -> WebElement:
+    """Busca el botón o control de búsqueda entre varios selectores posibles."""
+    candidatos = [
+        (By.CSS_SELECTOR, SEL_BTN_BUSCAR),
+        (By.CSS_SELECTOR, "input#btnBuscar"),
+        (By.CSS_SELECTOR, "button#btnBuscar"),
+        (By.CSS_SELECTOR, "input[type='submit'][value*='Buscar']"),
+        (By.CSS_SELECTOR, "input[type='button'][value*='Buscar']"),
+        (By.XPATH, "//button[contains(translate(normalize-space(.),'BUSCAR','buscar'),'buscar') ]"),
+        (By.XPATH, "//input[@type='submit' and contains(translate(@value,'BUSCAR','buscar'),'buscar') ]"),
+    ]
+
+    for by, selector in candidatos:
+        try:
+            return _esperar_elemento(driver, by, selector, timeout=10, clickable=True)
+        except SecopTimeoutError:
+            continue
+
+    raise SecopTimeoutError(
+        "No se encontró el botón Buscar en la página de SECOP.",
+        context={"url": driver.current_url},
+    )
+
+
 def rellenar_formulario(driver: WebDriver, params: SearchParams) -> None:
     """Rellena todos los campos del formulario de búsqueda de SECOP I.
 
@@ -418,8 +457,10 @@ def rellenar_formulario(driver: WebDriver, params: SearchParams) -> None:
     logger.info("Navegando a %s", SECOP_CONSULTA_URL)
     driver.get(SECOP_CONSULTA_URL)
 
+    _verificar_error_http(driver)
+
     # Esperar a que el formulario esté disponible
-    _esperar_elemento(driver, By.CSS_SELECTOR, SEL_BTN_BUSCAR, clickable=True)
+    _encontrar_boton_buscar(driver)
     logger.info("Formulario de búsqueda cargado.")
 
     # Verificar CAPTCHA antes de interactuar
@@ -488,19 +529,19 @@ def enviar_formulario(driver: WebDriver) -> None:
         SecopRecaptchaError: Si aparece CAPTCHA tras el envío.
     """
     try:
-        boton = _esperar_elemento(
-            driver, By.CSS_SELECTOR, SEL_BTN_BUSCAR, clickable=True
-        )
+        boton = _encontrar_boton_buscar(driver)
         boton.click()
         logger.info("Formulario enviado (botón Buscar).")
     except SecopTimeoutError as exc:
         raise SecopFormError(
             "No se encontró el botón Buscar.",
-            context={"selector": SEL_BTN_BUSCAR},
+            context={"url": driver.current_url},
         ) from exc
 
     # Pausa para que el servidor procese la consulta
     time.sleep(PAGE_LOAD_WAIT)
+
+    _verificar_error_http(driver)
 
     # Verificar CAPTCHA post-envío
     manejar_recaptcha(driver)
