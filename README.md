@@ -1,238 +1,252 @@
-# Adel_Sector — Pipeline de Scraping SECOP I
+# Adel_Sector — Contratación pública colombiana: SECOP I + SECOP II
 
-Pipeline automatizado de extracción, parsing y limpieza de datos de contratación pública del portal **SECOP I** ([contratos.gov.co](https://www.contratos.gov.co)).
+Extrae datos de contratación pública de los **dos** portales del Estado
+colombiano, los unifica en un solo esquema y genera el **Estudio del
+Sector** con la estructura que exige Colombia Compra Eficiente.
+
+| Fuente | Qué es | Cómo se consulta |
+|---|---|---|
+| **SECOP I** | Portal [contratos.gov.co](https://www.contratos.gov.co) | HTTP directo, sin navegador |
+| **SECOP II** | API de [datos.gov.co](https://www.datos.gov.co) (Socrata) | Consultas SoQL con filtros en servidor |
+
+Incluye un dashboard en Streamlit que consulta ambos portales **en vivo**
+y exporta el Estudio del Sector a Word y PDF.
 
 ---
 
 ## Arquitectura
 
+Dos rutas de extracción independientes, con esquemas de columnas
+distintos, que convergen en la capa de limpieza:
+
 ```
-Selenium (scraper.py)
-    │
-    ├── Formulario dinámico (palabra clave, fechas, modalidad, departamento)
-    ├── Manejo robusto de iframe
-    ├── Paginación automática (todas las páginas)
-    └── Detección de reCAPTCHA
-    │
-    ▼
-BeautifulSoup (parser.py)
-    │
-    ├── Localización inteligente de tabla (3 estrategias)
-    ├── Extracción de encabezados y filas
-    ├── URLs de detalle por proceso
-    └── Consolidación multi-página
-    │
-    ▼
-Pandas (cleaning.py)
-    │
-    ├── Normalización de strings
-    ├── Conversión monetaria colombiana → float
-    ├── Parseo de fechas (múltiples formatos)
-    ├── Eliminación de filas vacías
-    └── Reporte de calidad de datos
-    │
-    ▼
-CSV / Parquet (output/)
+Ruta A — SECOP I                        Ruta B — SECOP II
+
+scraper.py                              api_scraper.py
+  · sesión HTTP + cookies                 · consultas SoQL
+  · resultadosConsulta.do (GET)           · paginación estable ($order=:id)
+  · paginación por paginaObjetivo         · sin tope de registros
+  · manejo del WAF (403 + backoff)        · filtros en el servidor
+  · Selenium solo como respaldo                    │
+        │                                          │
+parser.py                                          │
+  · 9 columnas reales de la tabla                  │
+  · id_proceso desde consultaProceso()             │
+  · departamento/municipio y fecha                 │
+        │                                          │
+        └──────────► cleaning.py ◄─────────────────┘
+                       · moneda (dos convenciones)
+                       · fechas (dd-mm-yyyy e ISO)
+                       · filtro local por palabra clave
+                            │
+                    ┌───────┴────────┐
+              CSV en output/     consulta.py ──► app.py ──► estudio_sector.py
+                                (consulta en vivo)            (Word / PDF)
 ```
 
-## Estructura del Proyecto
+`catalogos.py` es la única fuente de verdad de los valores de filtro: los
+dos portales **no nombran igual las mismas cosas** y una diferencia de
+una letra devuelve cero registros sin ningún error.
+
+## Estructura del proyecto
 
 ```
 Adel_Sector/
-├── config.py            # Constantes, selectores, logging, SearchParams
-├── exceptions.py        # Excepciones personalizadas del pipeline
-├── scraper.py           # Automatización Selenium (formulario, iframe, paginación)
-├── parser.py            # Parsing HTML → DataFrame estructurado
-├── cleaning.py          # Limpieza y tipificación de datos
-├── detail_scraper.py    # Extracción de detalles individuales de proceso
-├── main.py              # Orquestador CLI (punto de entrada)
-├── requirements.txt     # Dependencias Python
-├── output/              # Archivos CSV/Parquet generados (auto-creado)
-├── logs/                # Logs rotativos del pipeline (auto-creado)
-└── README.md
+├── config.py             # Endpoints, códigos, selectores, SearchParams, logging
+├── catalogos.py          # Departamentos, modalidades, tipos y estados por portal
+├── exceptions.py         # Excepciones tipadas del pipeline
+├── scraper.py            # SECOP I: transporte HTTP (+ Selenium de respaldo)
+├── parser.py             # HTML de SECOP I → DataFrame estructurado
+├── api_scraper.py        # SECOP II: API de Datos Abiertos
+├── cleaning.py           # Limpieza y tipificación (única capa que convierte tipos)
+├── detail_scraper.py     # Ficha de detalle de un proceso de SECOP I
+├── consulta.py           # Consulta en vivo y unificación de esquemas
+├── estudio_sector.py     # Estudio del Sector en Word y PDF (Guía V3)
+├── main.py               # CLI (punto de entrada)
+├── app.py                # Dashboard Streamlit
+├── verificar_fuentes.py  # Chequeo de salud de ambas fuentes
+├── demo_pipeline.py      # Smoke test sin red
+├── Dockerfile            # Despliegue en contenedor
+├── output/               # CSV generados (auto-creado, ignorado por git)
+└── logs/                 # Logs rotativos (auto-creado, ignorado por git)
 ```
 
 ## Instalación
 
 ```bash
-# Clonar el repositorio
 git clone https://github.com/ErickFMR777/Adel_Sector.git
 cd Adel_Sector
 
-# Crear entorno virtual (recomendado)
 python -m venv .venv
-source .venv/bin/activate  # Linux/Mac
-# .venv\Scripts\activate   # Windows
+source .venv/bin/activate      # Linux/Mac
+# .venv\Scripts\activate       # Windows
 
-# Instalar dependencias
 pip install -r requirements.txt
 ```
 
-> **Requisito:** Google Chrome debe estar instalado en el sistema. `webdriver-manager` descarga ChromeDriver automáticamente.
+> **No hace falta Chrome.** La ruta principal de SECOP I usa HTTP
+> directo. Chrome solo se necesita si fuerzas `--selenium`, y en ese caso
+> se detecta automáticamente según el sistema operativo (o se indica con
+> `CHROME_BINARY`).
 
-## Uso
-
-### Modo Búsqueda (por defecto)
-
-Rellena el formulario de SECOP I con los parámetros dados, extrae la tabla de resultados completa (todas las páginas) y exporta un CSV limpio.
-
-```bash
-# Búsqueda por palabra clave
-python main.py --palabra-clave "vigilancia"
-
-# Búsqueda con filtros completos
-python main.py \
-    --palabra-clave "consultoría" \
-    --fecha-inicio "01/01/2025" \
-    --fecha-fin "30/06/2025" \
-    --departamento "ANTIOQUIA" \
-    --modalidad "Licitación pública" \
-    --salida output/consultoria_antioquia.csv
-
-# Con salida personalizada y límite de páginas
-python main.py \
-    --palabra-clave "obra civil" \
-    --max-paginas 10 \
-    --salida output/obra_civil.csv
-```
-
-### Modo Detalle
-
-Toma un CSV previamente generado (con columna `url_detalle`) e ingresa a cada proceso individual para extraer datos enriquecidos (proveedor, NIT, valor adjudicado, etc.).
+## Uso desde la línea de comandos
 
 ```bash
-python main.py \
-    --modo detalle \
-    --entrada output/consultoria_antioquia.csv \
-    --salida output/detalles_antioquia.csv
+# SECOP II (API): rápido, filtros en el servidor
+python main.py --fuente api \
+    --departamento Santander \
+    --modalidad "Mínima cuantía" \
+    --tipo-contrato Obra \
+    --fecha-inicio 01/01/2026 --fecha-fin 31/03/2026
 
-# Con base histórica incremental
-python main.py \
-    --modo detalle \
-    --entrada output/resultados.csv \
-    --historica output/base_historica.csv
+# SECOP I (portal): datos en tiempo real
+python main.py --fuente secop1 \
+    --departamento Santander \
+    --modalidad "Mínima Cuantía" --estado Celebrado \
+    --max-paginas 5
+
+# auto (por defecto): intenta SECOP I y cae a la API si falla
+python main.py --palabra-clave vigilancia
+
+# Consulta nacional: sin departamento
+python main.py --fuente api --tipo-contrato Interventoría
+
+# Enriquecer con la ficha de detalle (usa la columna url_detalle)
+python main.py --modo detalle --entrada output/resultados.csv
+
+# Dashboard
+streamlit run app.py
 ```
 
-### Variables de Entorno
+> **SECOP I no tiene búsqueda por texto libre.** Su formulario solo
+> filtra por código UNSPSC, entidad, fechas, modalidad, estado, ubicación
+> y cuantía. Por eso `--palabra-clave` se aplica en local sobre lo
+> descargado; en la API sí viaja al servidor.
 
-| Variable | Valor | Descripción |
-|---|---|---|
-| `SECOP_HEADLESS` | `0` / `1` | Ejecutar Chrome sin ventana visible |
-| `SECOP_DEBUG` | `0` / `1` | Logging nivel DEBUG (más verboso) |
-
-```bash
-# Modo headless + debug
-SECOP_HEADLESS=1 SECOP_DEBUG=1 python main.py --palabra-clave "vigilancia"
-```
-
-### Todos los argumentos
-
-```
-python main.py --help
-```
+### Argumentos
 
 | Argumento | Alias | Descripción |
 |---|---|---|
+| `--fuente` | | `auto` (default), `secop1` o `api` |
 | `--modo` | | `busqueda` (default) o `detalle` |
-| `--palabra-clave` | `-k` | Objeto del contrato (texto libre) |
+| `--palabra-clave` | `-k` | Texto en el objeto del contrato |
+| `--departamento` | `-d` | Código o nombre (ej. `668000` o `Santander`) |
+| `--modalidad` | `-m` | Código o nombre de cualquiera de los dos portales |
+| `--tipo-contrato` | | Solo API: `Obra`, `Consultoría`, `Interventoría`… |
+| `--estado` | | ID o nombre (ej. `4` o `Celebrado`) |
+| `--fecha-inicio` | `-fi` | Desde (`dd/MM/yyyy`) |
+| `--fecha-fin` | `-ff` | Hasta (`dd/MM/yyyy`) |
+| `--entidad` | | Nombre parcial de la entidad |
 | `--numero-proceso` | | Número específico de proceso |
-| `--entidad` | | Nombre (parcial) de la entidad |
-| `--fecha-inicio` | `-fi` | Fecha apertura desde (`dd/MM/yyyy`) |
-| `--fecha-fin` | `-ff` | Fecha apertura hasta (`dd/MM/yyyy`) |
-| `--modalidad` | `-m` | Modalidad de contratación |
-| `--departamento` | `-d` | Departamento |
-| `--municipio` | | Municipio |
-| `--estado` | | Estado del proceso |
-| `--max-paginas` | | Límite de páginas (default: 200) |
-| `--entrada` | `-i` | Archivo CSV de entrada (modo detalle) |
+| `--objeto` | | Código UNSPSC del segmento (ej. `80000000`) |
+| `--municipio` | | Código de municipio |
+| `--cuantia` | | Código del rango de cuantía |
+| `--max-paginas` | | Páginas de SECOP I (100 procesos cada una) |
+| `--max-registros` | | Tope de registros de la API (default: todos) |
+| `--selenium` | | Forzar navegador en SECOP I |
+| `--entrada` | `-i` | CSV de entrada (modo detalle) |
 | `--salida` | `-o` | Ruta del archivo de salida |
-| `--historica` | | Ruta de base histórica incremental |
-| `--delay-detalle` | | Segundos entre cada detalle (default: 1.5) |
-| `--debug` | | Activar logging DEBUG |
+| `--historica` | | Base histórica incremental |
+| `--delay-detalle` | | Segundos entre fichas de detalle (default: 1.5) |
+| `--debug` | | Logging nivel DEBUG |
 
-## Campos Extraídos
+### Variables de entorno
 
-### Tabla de Resultados (modo búsqueda)
+| Variable | Efecto |
+|---|---|
+| `SECOP_DELAY` | Segundos entre páginas de SECOP I (default 2.5) |
+| `SECOP_DEBUG` | `1` para logging DEBUG |
+| `SECOP_HEADLESS` | `1` para Chrome sin ventana (ruta Selenium) |
+| `CHROME_BINARY` | Ruta al ejecutable de Chrome |
+| `SOCRATA_APP_TOKEN` | Evita el throttling de la API |
+| `SOCRATA_PAGE_SIZE` | Registros por página de la API (default 20000) |
+| `SECOP_CSV` | CSV concreto a abrir en el dashboard |
+| `PDF_FONT_DIR` | Carpeta con una TTF Unicode para exportar a PDF |
+
+## Campos extraídos
+
+### SECOP I (`scraper` + `parser`)
 
 | Columna | Descripción |
 |---|---|
-| `numero_proceso` | Identificador único del proceso |
+| `numero_proceso` | Número del proceso |
+| `id_proceso` | Identificador interno (`numConstancia`) |
 | `entidad` | Entidad compradora |
-| `objeto_contrato` | Descripción del objeto a contratar |
-| `modalidad` | Modalidad de contratación |
-| `fecha_apertura` | Fecha de apertura del proceso |
-| `fecha_cierre` | Fecha de cierre |
-| `cuantia` | Valor estimado (COP) |
-| `estado` | Estado actual del proceso |
-| `departamento` | Departamento |
-| `municipio` | Municipio |
-| `url_detalle` | URL para acceder a la ficha individual |
+| `objeto_contrato` | Objeto a contratar |
+| `modalidad` | Tipo de proceso |
+| `estado` | Estado del proceso |
+| `departamento` / `municipio` | Ubicación de ejecución |
+| `cuantia` | Valor en COP, ya tipado a `float` |
+| `fecha_apertura` | Fecha (`datetime`) |
+| `fecha_etiqueta` | Qué fecha es: celebración, apertura, liquidación… |
+| `url_detalle` | Ficha del proceso |
 
-### Detalle Individual (modo detalle)
+### SECOP II (`api_scraper`)
 
-Incluye todos los campos anteriores más:
+`nombre_entidad`, `nit_entidad`, `departamento`, `ciudad`,
+`modalidad_de_contratacion`, `estado_contrato`, `tipo_de_contrato`,
+`objeto_del_contrato`, `valor_del_contrato`, `valor_pagado`,
+`fecha_de_inicio_del_contrato`, `fecha_de_fin_del_contrato`,
+`fecha_de_firma`, `documento_proveedor`, `proveedor_adjudicado`,
+`proceso_de_compra`, `id_contrato`, `urlproceso`.
 
-| Columna | Descripción |
-|---|---|
-| `valor_estimado` | Presupuesto estimado (COP) |
-| `valor_adjudicado` | Valor de adjudicación (COP) |
-| `valor_contrato` | Valor del contrato (COP) |
-| `proveedor` | Razón social del contratista adjudicado |
-| `nit_proveedor` | NIT del proveedor |
-| `fecha_adjudicacion` | Fecha de adjudicación |
+`consulta.normalizar_esquema()` traduce el esquema de SECOP I al de la
+API, que es contra el que está escrito el dashboard.
 
-## Manejo de Errores
+### Ficha de detalle (`--modo detalle`)
 
-El pipeline define excepciones tipadas en `exceptions.py`:
+Añade `valor_estimado`, `valor_adjudicado`, `valor_contrato`,
+`numero_contrato`, `tipo_contrato`, `estado_contrato`, `proveedor`,
+`nit_proveedor`, `fecha_cierre` y `fecha_adjudicacion`.
+
+## Manejo de errores
+
+Excepciones tipadas en `exceptions.py`, todas con un dict `context` que
+se serializa en los logs:
 
 | Excepción | Cuándo se lanza |
 |---|---|
-| `SecopTimeoutError` | Elemento no cargó dentro del timeout |
-| `SecopRecaptchaError` | reCAPTCHA detectado (pausa para resolución manual) |
-| `SecopIframeError` | No se pudo acceder al iframe de resultados |
-| `SecopEmptyTableError` | La consulta retornó 0 registros |
+| `SecopBlockedError` | El WAF del portal bloqueó la IP (403) |
+| `SecopTimeoutError` | Se agotaron los reintentos de red o de espera |
+| `SecopRecaptchaError` | reCAPTCHA **visible** (el v3 invisible no cuenta) |
+| `SecopIframeError` | No se localizó el iframe de resultados |
+| `SecopEmptyTableError` | La consulta no devolvió registros |
 | `SecopFormError` | Error al interactuar con el formulario |
+| `SecopParsingError` | Cambió la estructura del HTML |
 | `SecopPaginationError` | Error navegando entre páginas |
-| `SecopParsingError` | Error al parsear el HTML |
 | `SecopExportError` | Error al guardar el archivo |
-
-Cada excepción lleva un `context` dict para depuración detallada en los logs.
 
 ## Logging
 
-Los logs se guardan en `logs/secop_pipeline.log` (rotativo, 5 MB × 5 backups) y se imprimen en consola.
+Los logs van a consola y a `logs/secop_pipeline.log` (rotativo, 5 MB × 5).
 
 ```
-2025-06-15 14:30:22 | INFO     | scraper              | rellenar_formulario   | Formulario rellenado: palabra_clave='vigilancia', ...
-2025-06-15 14:30:25 | INFO     | scraper              | cambiar_a_iframe      | Cambio a iframe 'iframeVentana' exitoso.
-2025-06-15 14:30:28 | INFO     | scraper              | recopilar_html_paginas| Recopilando página 1...
+2026-07-30 10:22 | INFO | scraper  | ejecutar_scraping_http        | [HTTP] 5.065 registros encontrados → 51 páginas (se descargarán 2).
+2026-07-30 10:22 | INFO | cleaning | convertir_columnas_monetarias | Columnas monetarias convertidas: ['cuantia']
+2026-07-30 10:22 | INFO | cleaning | convertir_columnas_fecha      | Columnas de fecha convertidas: ['fecha_apertura']
 ```
 
-## Escalabilidad
-
-El proyecto está diseñado para crecer:
-
-1. **`detail_scraper.py`**: Ya soporta extracción masiva con rate limiting y base histórica incremental.
-2. **`actualizar_base_historica()`**: Combina datos nuevos con un CSV/Parquet existente, deduplicando por `numero_proceso`.
-3. **`SearchParams`**: Dataclass inmutable que facilita crear scripts de barrido por departamento, modalidad, etc.
+## Uso como biblioteca
 
 ```python
-# Ejemplo: barrido por departamento
-from config import SearchParams
-from scraper import ejecutar_scraping
+# Barrido por departamento contra ambos portales
+from consulta import consultar_en_vivo
 
-departamentos = ["BOGOTÁ D.C.", "ANTIOQUIA", "VALLE DEL CAUCA"]
-
-for depto in departamentos:
-    params = SearchParams(
-        palabra_clave="consultoría",
-        departamento=depto,
-        fecha_inicio="01/01/2025",
-        fecha_fin="31/12/2025",
+for departamento in ["Bogotá D.C.", "Antioquia", "Valle del Cauca"]:
+    df, informe = consultar_en_vivo(
+        fuentes=("SECOP II", "SECOP I"),
+        departamento=departamento,
+        modalidad="Mínima cuantía",
+        fecha_inicio="01/01/2026",
+        fecha_fin="31/03/2026",
+        max_paginas_secop1=3,
     )
-    html_pages, urls = ejecutar_scraping(params)
-    # ... parsear y guardar por departamento
+    print(departamento, len(df), informe["por_fuente"])
+    df.to_csv(f"output/{departamento}.csv", index=False, encoding="utf-8-sig")
 ```
+
+Los nombres se resuelven contra `catalogos.py`, así que `"Bogotá D.C."`
+funciona aunque la API lo llame `"Distrito Capital de Bogotá"`.
 
 ## El dashboard consulta en vivo
 
